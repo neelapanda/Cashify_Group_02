@@ -176,17 +176,32 @@ LAYOUT = dict(
 )
 
 def styled(fig, title="", h=480):
-    fig.update_layout(**LAYOUT,
-                      title=dict(text=title, font=dict(size=14, color=TEXT)),
-                      height=h)
+    fig.update_layout(**LAYOUT)
+    fig.update_layout(
+        height=h,
+        title=dict(
+            text=title,
+            font=dict(size=14, color=TEXT),
+            x=0.01,
+            xanchor="left"
+        )
+    )
     return fig
 
 # ── 4. HELPERS ────────────────────────────────────────────────────────────────
 def flt(df, g, a, c):
+
     d = df.copy()
-    if g != "All": d = d[d["Gender"] == g]
-    if a != "All": d = d[d["Age"]    == a]
-    if c != "All": d = d[d["City"]   == c]
+
+    if g != "All":
+        d = d[d["Gender"] == g]
+
+    if a != "All":
+        d = d[d["Age"] == a]
+
+    if c != "All":
+        d = d[d["City"] == c]
+
     return d
 
 def to_int(x):
@@ -335,37 +350,211 @@ def chart_nps(df, brands, nps_cols, lbl, g, a, c):
                       yaxis2=dict(gridcolor=BORDER, zerolinecolor=BORDER))
     return fig
 
+def chart_brand_funnel(df, brands, fam_cols, con_cols, lbl, g, a, c):
+
+    d = flt(df, g, a, c)
+    n = len(d)
+
+    rows = []
+
+    for brand in brands:
+
+        aware = d["Q12"].fillna("").str.lower().str.contains(brand.lower(), regex=False).mean()*100
+
+        fam_col = fam_cols.get(brand,"")
+        if fam_col in d.columns:
+            fam = d[fam_col].notna().mean()*100
+        else:
+            fam = 0
+
+        con_col = con_cols.get(brand,"")
+        if con_col in d.columns:
+            consider = d[con_col].str.contains("consider",case=False,na=False).mean()*100
+        else:
+            consider = 0
+
+        rows.append({
+            "Brand":brand,
+            "Awareness":round(aware,1),
+            "Familiarity":round(fam,1),
+            "Consideration":round(consider,1)
+        })
+
+    res = pd.DataFrame(rows)
+
+    stages = ["Awareness","Familiarity","Consideration"]
+
+    fig = go.Figure()
+
+    for i,row in res.iterrows():
+
+        fig.add_trace(go.Scatter(
+            x=stages,
+            y=[row["Awareness"],row["Familiarity"],row["Consideration"]],
+            mode="lines+markers",
+            name=row["Brand"],
+            line=dict(width=4 if row["Brand"]=="Cashify" else 2,
+                      color=CASHIFY if row["Brand"]=="Cashify" else PALETTE[i%len(PALETTE)])
+        ))
+
+    fig.update_layout(
+        **LAYOUT,
+        height=500,
+        title=f"I. Brand Funnel (McKinsey Style) — {lbl} (n={n})"
+    )
+
+    return fig
+def chart_positioning(df, brands, nps_cols, fam_cols, con_cols, lbl, g, a, c):
+
+    d = flt(df,g,a,c)
+    n = len(d)
+
+    rows=[]
+
+    for brand in brands:
+
+        aware = d["Q12"].fillna("").str.lower().str.contains(brand.lower(),regex=False).mean()*100
+
+        con_col = con_cols.get(brand,"")
+        if con_col in d.columns:
+            consider = d[con_col].str.contains("consider",case=False,na=False).mean()*100
+        else:
+            consider=0
+
+        nps_col = nps_cols.get(brand,"")
+        if nps_col in d.columns:
+            nps,_p,_pa,_d = calc_nps(d[nps_col])
+        else:
+            nps=0
+
+        rows.append({
+            "Brand":brand,
+            "Awareness":aware,
+            "Consideration":consider,
+            "NPS":nps
+        })
+
+    res = pd.DataFrame(rows)
+
+    fig = px.scatter(
+        res,
+        x="Awareness",
+        y="NPS",
+        size="Consideration",
+        text="Brand"
+    )
+
+    fig.update_traces(
+        marker=dict(
+            color=[CASHIFY if b=="Cashify" else "#6366F1" for b in res["Brand"]],
+            line=dict(width=1,color="#000")
+        )
+    )
+
+    fig.update_layout(
+        **LAYOUT,
+        height=520,
+        title=f"J. Market Positioning Map — {lbl} (n={n})"
+    )
+
+    fig.update_xaxes(title="Brand Awareness (%)")
+    fig.update_yaxes(title="Net Promoter Score")
+
+    return fig
 
 def chart_soa(df, brands, soa_cols, lbl, g, a, c):
+    """
+    Source of Awareness: grouped horizontal bar chart.
+    For each CHANNEL (y-axis), shows % of respondents who cited it
+    for each BRAND (separate coloured bars).
+    Completely distinct from the Consideration Set stacked bars.
+    """
     d = flt(df, g, a, c); n = len(d)
+
+    # ── Collect all unique channels ──────────────────────────────────────────
     all_ch = set()
     for brand in brands:
         col = soa_cols.get(brand, "")
         if col and col in d.columns:
             d[col].dropna().str.split(",").explode().str.strip().apply(
-                lambda x: all_ch.add(x) if x and x.lower() not in ("nan","") else None)
+                lambda x: all_ch.add(x) if x and x.lower() not in ("nan", "") else None)
     channels = sorted([ch for ch in all_ch if ch and len(ch) > 2])
-    matrix, vb = [], []
+    if not channels:
+        fig = go.Figure()
+        fig.add_annotation(text="No Source of Awareness data for this filter",
+                           xref="paper", yref="paper", x=0.5, y=0.5,
+                           showarrow=False, font=dict(size=14, color=MUTED))
+        fig.update_layout(**LAYOUT, height=400)
+        fig.update_layout(title_text="D.  Source of Awareness — No data")
+        return fig
+
+    # Shorten channel labels for display
+    ch_labels = [ch.replace("Saw as brand integration on a Youtube show",
+                             "YouTube brand integration")
+                   .replace("Price–comparison site/Deal–blog", "Price comparison / Deal blog")
+                   .replace("Social media ad (Instagram/Facebook)", "Social media ad")
+                   .replace("Influencer video recommending it", "Influencer video")
+                   .replace("YouTube review/Unboxing", "YouTube review/Unboxing")
+                 for ch in channels]
+
+    # ── Build % matrix: rows=brands, cols=channels ───────────────────────────
+    # Denominator = respondents aware of that brand (non-null Q13 col)
+    # This gives "of those aware of Brand X, what % heard via each channel"
+    brand_colors = {}
+    for i, brand in enumerate(brands):
+        brand_colors[brand] = CASHIFY if brand == "Cashify" else PALETTE[i % len(PALETTE)]
+
+    fig = go.Figure()
     for brand in brands:
         col = soa_cols.get(brand, "")
-        if not col or col not in d.columns: continue
-        row = [round(d[col].fillna("").str.lower()
-                     .str.contains(ch.lower(), regex=False).mean()*100, 1)
-               for ch in channels]
-        matrix.append(row); vb.append(brand)
-    if not matrix: return go.Figure()
-    fig = go.Figure(go.Heatmap(
-        z=matrix, x=channels, y=vb, colorscale="RdYlGn",
-        text=[[f"{v}%" for v in row] for row in matrix],
-        texttemplate="%{text}", textfont={"size": 9},
-        hovertemplate="Brand: %{y}<br>Channel: %{x}<br>%{z}%<extra></extra>"
+        if not col or col not in d.columns:
+            continue
+        base = d[col].notna().sum()          # only aware respondents as denominator
+        if base == 0:
+            continue
+        pcts = []
+        for ch in channels:
+            cnt = d[col].fillna("").str.lower()\
+                         .str.contains(ch.lower(), regex=False).sum()
+            pcts.append(round(cnt / base * 100, 1))
+
+        fig.add_trace(go.Bar(
+            name=brand,
+            y=ch_labels,
+            x=pcts,
+            orientation="h",
+            marker_color=brand_colors.get(brand, "#6366F1"),
+            text=[f"{v}%" if v > 0 else "" for v in pcts],
+            textposition="outside",
+            hovertemplate=(
+                f"<b>{brand}</b><br>"
+                "Channel: %{y}<br>"
+                "% Aware audience: %{x}%<br>"
+                f"(Base: {base} aware respondents)"
+                "<extra></extra>"
+            )
+        ))
+
+    fig.update_layout(
+    **LAYOUT,
+    barmode="group",
+    height=max(500, 55 * len(channels) + 120),
+    )
+    fig.update_layout(
+    margin=dict(t=80, b=50, l=220, r=160)
+    )
+    fig.update_layout(title_text=(
+        f"D.  Source of Awareness — How consumers discovered each platform  |  "
+        f"{lbl} study | n={n} | % of brand-aware respondents per channel"
     ))
-    fig.update_layout(**LAYOUT,
-                      title=dict(text=f"D.  Source of Awareness Heatmap — {lbl}  (n={n})",
-                                 font=dict(size=14, color=TEXT)),
-                      height=max(440, 58*len(vb)),
-                      xaxis=dict(tickangle=-35, gridcolor=BORDER),
-                      yaxis=dict(gridcolor=BORDER))
+    fig.update_xaxes(
+        title_text="% of brand-aware respondents",
+        gridcolor=BORDER, zerolinecolor=BORDER, ticksuffix="%"
+    )
+    fig.update_yaxes(
+        gridcolor=BORDER, zerolinecolor=BORDER,
+        tickfont=dict(size=11), autorange="reversed"
+    )
     return fig
 
 
@@ -398,26 +587,69 @@ def chart_consideration(df, brands, con_cols, lbl, g, a, c):
 
 def chart_drivers(df, cashify_cols, comp_cols, lbl, g, a, c):
     d = flt(df, g, a, c); n = len(d)
+
+    # Q20 = only Cashify buyers answered | Q21A = only non-Cashify buyers answered
+    # Determine base sizes for honest labelling
+    cashify_base = int(d[[col for col in cashify_cols.values() if col in d.columns][0:1]
+                         ].notna().any(axis=1).sum()) if cashify_cols else 0
+    comp_base    = int(d[[col for col in comp_cols.values()    if col in d.columns][0:1]
+                         ].notna().any(axis=1).sum()) if comp_cols else 0
+
     cs = driver_score(d, cashify_cols)
     ks = driver_score(d, comp_cols)
+
+    # If both empty → show informative empty state
+    if not cs and not ks:
+        fig = go.Figure()
+        fig.add_annotation(
+            text=(f"No choice driver data available for this filter<br>"
+                  f"<i>Choice drivers are only answered by actual buyers/sellers.<br>"
+                  f"Try selecting 'All' for age/gender/city to see aggregate results.</i>"),
+            xref="paper", yref="paper", x=0.5, y=0.5,
+            showarrow=False, font=dict(size=14, color=MUTED),
+            align="center"
+        )
+        return fig.update_layout(**LAYOUT, height=400,
+            title=dict(text=f"F.  Choice Drivers — {lbl} (Insufficient data for selected filter)",
+                       font=dict(size=14, color=TEXT)))
+
     all_f = sorted(set(list(cs) + list(ks)))
-    if not all_f: return go.Figure()
-    mx = max(list(cs.values()) + list(ks.values()) + [1])
-    c_n = [round(cs.get(f, 0)/mx*100, 1) for f in all_f]
-    k_n = [round(ks.get(f, 0)/mx*100, 1) for f in all_f]
-    order  = sorted(range(len(all_f)), key=lambda i: c_n[i])
-    fsort  = [all_f[i] for i in order]
-    csort  = [c_n[i]   for i in order]
-    ksort  = [k_n[i]   for i in order]
+    mx    = max(list(cs.values()) + list(ks.values()) + [1])
+    c_n   = [round(cs.get(f, 0)/mx*100, 1) for f in all_f]
+    k_n   = [round(ks.get(f, 0)/mx*100, 1) for f in all_f]
+    order = sorted(range(len(all_f)), key=lambda i: c_n[i])
+    fsort = [all_f[i] for i in order]
+    csort = [c_n[i]   for i in order]
+    ksort = [k_n[i]   for i in order]
+
+    cashify_label = f"Cashify buyers (n={cashify_base})" if cashify_base > 0 else "Cashify (no data)"
+    comp_label    = f"Other platforms (n={comp_base})"   if comp_base   > 0 else "Competitors (no data)"
+
     fig = go.Figure()
-    fig.add_trace(go.Bar(y=fsort, x=csort, name="Cashify", orientation="h",
-                         marker_color=CASHIFY,
-                         text=[f"{v}" for v in csort], textposition="outside"))
-    fig.add_trace(go.Bar(y=fsort, x=ksort, name="Competitors (avg)", orientation="h",
-                         marker_color="#6366F1",
-                         text=[f"{v}" for v in ksort], textposition="outside"))
+    if any(v > 0 for v in csort):
+        fig.add_trace(go.Bar(
+            y=fsort, x=csort, name=cashify_label, orientation="h",
+            marker_color=CASHIFY,
+            text=[f"{v}" if v > 0 else "" for v in csort],
+            textposition="outside"
+        ))
+    if any(v > 0 for v in ksort):
+        fig.add_trace(go.Bar(
+            y=fsort, x=ksort, name=comp_label, orientation="h",
+            marker_color="#6366F1",
+            text=[f"{v}" if v > 0 else "" for v in ksort],
+            textposition="outside"
+        ))
+
+    # Add base size note
+    note = (f"Cashify buyers: n={cashify_base} | "
+            f"Other platform buyers: n={comp_base} | "
+            f"Note: Only actual buyers answer choice drivers")
     fig.update_layout(barmode="group")
-    return styled(fig, f"F.  Choice Drivers: Cashify vs Competitors — {lbl}  (n={n})", 580)
+    return styled(fig,
+        f"F.  Choice Drivers: Cashify vs Competitors — {lbl}  (Total n={n})<br>"
+        f"<sup>{note}</sup>",
+        600)
 
 
 def chart_barriers(df, col, lbl, g, a, c):
@@ -430,6 +662,138 @@ def chart_barriers(df, col, lbl, g, a, c):
                            text=counts.values, textposition="outside"))
     return styled(fig, f"G.  Barriers to Choosing Cashify — {lbl}  (n={n})", 520)
 
+def chart_radar(df, brands, fam_cols, con_cols, nps_cols, lbl, g, a, c):
+
+    d = flt(df, g, a, c)
+
+    rows = []
+
+    for brand in brands:
+
+        awareness = d["Q12"].fillna("").str.lower().str.contains(
+            brand.lower(), regex=False).mean()*100
+
+        fam_col = fam_cols.get(brand,"")
+        if fam_col in d.columns:
+            familiarity = d[fam_col].notna().mean()*100
+        else:
+            familiarity = 0
+
+        con_col = con_cols.get(brand,"")
+        if con_col in d.columns:
+            consideration = d[con_col].str.contains(
+                "consider",case=False,na=False).mean()*100
+        else:
+            consideration = 0
+
+        nps_col = nps_cols.get(brand,"")
+        if nps_col in d.columns:
+            nps,_,_,_ = calc_nps(d[nps_col])
+        else:
+            nps = 0
+
+        rows.append({
+            "Brand":brand,
+            "Awareness":awareness,
+            "Familiarity":familiarity,
+            "Consideration":consideration,
+            "NPS":max(0,nps+50)  # normalize for radar
+        })
+
+    res = pd.DataFrame(rows)
+
+    categories = ["Awareness","Familiarity","Consideration","NPS"]
+
+    fig = go.Figure()
+
+    for i,row in res.iterrows():
+
+        values = [
+            row["Awareness"],
+            row["Familiarity"],
+            row["Consideration"],
+            row["NPS"]
+        ]
+
+        values.append(values[0])
+
+        fig.add_trace(go.Scatterpolar(
+            r=values,
+            theta=categories+ [categories[0]],
+            fill='toself',
+            name=row["Brand"],
+            line=dict(
+                color=CASHIFY if row["Brand"]=="Cashify"
+                else PALETTE[i % len(PALETTE)]
+            )
+        ))
+
+    fig.update_layout(
+        polar=dict(radialaxis=dict(visible=True,range=[0,100])),
+        showlegend=True,
+        **LAYOUT,
+        height=520,
+        title=f"K. Competitive Brand Radar — {lbl}"
+    )
+
+    return fig
+def chart_brand_power(df, brands, fam_cols, con_cols, nps_cols, lbl, g, a, c):
+
+    d = flt(df, g, a, c)
+
+    rows = []
+
+    for brand in brands:
+
+        awareness = d["Q12"].fillna("").str.lower().str.contains(
+            brand.lower(),regex=False).mean()*100
+
+        fam_col = fam_cols.get(brand,"")
+        familiarity = d[fam_col].notna().mean()*100 if fam_col in d.columns else 0
+
+        con_col = con_cols.get(brand,"")
+        consideration = d[con_col].str.contains(
+            "consider",case=False,na=False).mean()*100 if con_col in d.columns else 0
+
+        nps_col = nps_cols.get(brand,"")
+        if nps_col in d.columns:
+            nps,_,_,_ = calc_nps(d[nps_col])
+        else:
+            nps = 0
+
+        score = (
+            0.40*awareness +
+            0.25*familiarity +
+            0.20*consideration +
+            0.15*(nps+50)
+        )
+
+        rows.append({
+            "Brand":brand,
+            "Power Score":round(score,1)
+        })
+
+    res = pd.DataFrame(rows).sort_values("Power Score",ascending=True)
+
+    fig = go.Figure(go.Bar(
+        y=res["Brand"],
+        x=res["Power Score"],
+        orientation="h",
+        marker_color=[
+            CASHIFY if b=="Cashify" else "#6366F1"
+            for b in res["Brand"]
+        ],
+        text=res["Power Score"],
+        textposition="outside"
+    ))
+
+    fig.update_layout(
+        **LAYOUT,
+        height=500,
+        title=f"L. Brand Power Index — {lbl}"
+    )
+
+    return fig
 
 def chart_category(df, is_refurb, lbl, g, a, c):
     d = flt(df, g, a, c); n = len(d)
@@ -489,6 +853,255 @@ def chart_category(df, is_refurb, lbl, g, a, c):
                       xaxis2=dict(gridcolor=BORDER, zerolinecolor=BORDER),
                       yaxis2=dict(gridcolor=BORDER, zerolinecolor=BORDER))
     return fig
+def chart_market_opportunity(df, brands, lbl, g, a, c):
+
+    d = flt(df, g, a, c)
+
+    segments = ["Gender", "Age", "City"]
+
+    rows = []
+
+    for seg in segments:
+
+        values = d[seg].dropna().unique()
+
+        for v in values:
+
+            sub = d[d[seg] == v]
+
+            cash_aw = sub["Q12"].fillna("").str.lower().str.contains(
+                "cashify", regex=False).mean()*100
+
+            comp_aw = sub["Q12"].fillna("").str.lower().str.contains(
+                "|".join([b.lower() for b in brands if b != "Cashify"]),
+                regex=True).mean()*100
+
+            opportunity = comp_aw - cash_aw
+
+            rows.append({
+                "Segment": f"{seg}: {v}",
+                "Cashify Awareness": round(cash_aw,1),
+                "Competitor Awareness": round(comp_aw,1),
+                "Opportunity Score": round(opportunity,1)
+            })
+
+    res = pd.DataFrame(rows)
+
+    fig = px.imshow(
+        res[["Cashify Awareness","Competitor Awareness","Opportunity Score"]],
+        labels=dict(x="Metric",y="Segment",color="Score"),
+        y=res["Segment"],
+        color_continuous_scale="RdYlGn_r"
+    )
+
+    fig.update_layout(
+        **LAYOUT,
+        height=520,
+        title=f"M. Market Opportunity Heatmap — {lbl}"
+    )
+
+    return fig
+
+def detect_market_opportunities(df, brands):
+
+    insights = []
+
+    genders = df["Gender"].dropna().unique()
+
+    for g in genders:
+
+        sub = df[df["Gender"] == g]
+
+        cash_aw = sub["Q12"].fillna("").str.lower().str.contains(
+            "cashify", regex=False).mean()*100
+
+        comp_aw = sub["Q12"].fillna("").str.lower().str.contains(
+            "|".join([b.lower() for b in brands if b != "Cashify"]),
+            regex=True).mean()*100
+
+        if comp_aw - cash_aw > 20:
+
+            insights.append(
+                f"{g} segment shows strong competitor awareness but low Cashify awareness — marketing opportunity."
+            )
+
+    if len(insights) == 0:
+
+        insights.append(
+            "No major awareness gaps detected across demographic segments."
+        )
+
+    return insights
+
+def channel_strategy_insights(df):
+
+    insights = []
+
+    if "Q13" not in df.columns:
+        return insights
+
+    channels = (
+        df["Q13"]
+        .dropna()
+        .str.split(",")
+        .explode()
+        .str.strip()
+    )
+
+    counts = channels.value_counts()
+
+    if len(counts) == 0:
+        return insights
+
+    top_channel = counts.index[0]
+
+    insights.append(
+        f"{top_channel} is the strongest acquisition channel."
+    )
+
+    if "influencer" in top_channel.lower():
+        insights.append(
+            "Influencer marketing appears highly effective for discovery."
+        )
+
+    if "youtube" in top_channel.lower():
+        insights.append(
+            "Video content is a major driver of brand discovery."
+        )
+
+    if counts.iloc[0] > counts.mean():
+        insights.append(
+            "Channel concentration is high — diversifying acquisition channels may reduce dependency."
+        )
+
+    return insights
+
+def chart_channel_attribution(df, brands, soa_cols, lbl, g, a, c):
+
+    d = flt(df, g, a, c)
+
+    all_channels = []
+
+    for brand in brands:
+
+        col = soa_cols.get(brand, "")
+
+        if col in d.columns:
+
+            channels = (
+                d[col]
+                .dropna()
+                .str.split(",")
+                .explode()
+                .str.strip()
+            )
+
+            all_channels.extend(channels.tolist())
+
+    if len(all_channels) == 0:
+
+        fig = go.Figure()
+
+        fig.add_annotation(
+            text="No channel data available",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            font=dict(size=16)
+        )
+
+        fig.update_layout(**LAYOUT)
+
+        return fig
+
+    counts = pd.Series(all_channels).value_counts()
+
+    res = pd.DataFrame({
+        "Channel": counts.index,
+        "Count": counts.values
+    })
+
+    res["Awareness %"] = res["Count"] / res["Count"].sum() * 100
+
+    fig = px.bar(
+        res,
+        x="Awareness %",
+        y="Channel",
+        orientation="h",
+        text=res["Awareness %"].round(1).astype(str) + "%",
+        color="Awareness %",
+        color_continuous_scale="Blues"
+    )
+
+    fig.update_layout(
+        **LAYOUT,
+        height=520,
+        title=f"N. Customer Acquisition Channel Attribution — {lbl}"
+    )
+
+    fig.update_yaxes(autorange="reversed")
+
+    return fig
+
+def chart_growth_simulator(df, brands, fam_cols, con_cols, nps_cols, awareness_boost, lbl, g, a, c):
+
+    d = flt(df, g, a, c)
+
+    rows = []
+
+    for brand in brands:
+
+        awareness = d["Q12"].fillna("").str.lower().str.contains(
+            brand.lower(), regex=False).mean()*100
+
+        fam_col = fam_cols.get(brand,"")
+        familiarity = d[fam_col].notna().mean()*100 if fam_col in d.columns else 0
+
+        con_col = con_cols.get(brand,"")
+        consideration = d[con_col].str.contains(
+            "consider",case=False,na=False).mean()*100 if con_col in d.columns else 0
+
+        nps_col = nps_cols.get(brand,"")
+        if nps_col in d.columns:
+            nps,_,_,_ = calc_nps(d[nps_col])
+        else:
+            nps = 0
+
+        # Apply simulated awareness increase
+        new_awareness = min(100, awareness + awareness_boost)
+
+        # Assume funnel conversion ratios remain constant
+        fam_ratio = familiarity/awareness if awareness>0 else 0
+        con_ratio = consideration/familiarity if familiarity>0 else 0
+
+        new_fam = new_awareness * fam_ratio
+        new_cons = new_fam * con_ratio
+
+        rows.append({
+            "Brand": brand,
+            "Awareness": awareness,
+            "Simulated Awareness": new_awareness,
+            "Simulated Consideration": new_cons,
+            "NPS": nps
+        })
+
+    res = pd.DataFrame(rows)
+
+    fig = px.bar(
+        res,
+        x="Brand",
+        y=["Awareness","Simulated Awareness"],
+        barmode="group",
+        text_auto=True
+    )
+
+    fig.update_layout(
+        **LAYOUT,
+        height=520,
+        title=f"O. Brand Growth Simulator (+{awareness_boost}% Awareness) — {lbl}"
+    )
+
+    return fig
 
 # ── 6. DASH LAYOUT ────────────────────────────────────────────────────────────
 app = dash.Dash(
@@ -497,8 +1110,121 @@ app = dash.Dash(
     title="Cashify DSS",
 )
 
+app.index_string = """<!DOCTYPE html>
+<html>
+<head>
+{%metas%}
+<title>{%title%}</title>
+{%favicon%}
+{%css%}
+<style>
+
+  /* Dropdown control box */
+  .Select-control {
+    background-color: #FFFFFF !important;
+    border-color: #CBD5E1 !important;
+    color: #000000 !important;
+  }
+
+  /* Typed text / selected value */
+  .Select-value-label,
+  .Select--single > .Select-control .Select-value,
+  .Select-placeholder,
+  .Select-input > input {
+    color: #000000 !important;
+  }
+
+  /* Dropdown menu panel */
+  .Select-menu-outer {
+    background-color: #1E293B !important;
+    border-color: #334155 !important;
+    z-index: 9999 !important;
+  }
+
+  /* Each option row */
+  .Select-option {
+    background-color: #1E293B !important;
+    color: #F1F5F9 !important;
+  }
+
+  .Select-option:hover,
+  .Select-option.is-focused {
+    background-color: #334155 !important;
+    color: #F1F5F9 !important;
+  }
+
+  .Select-option.is-selected {
+    background-color: #E5432A !important;
+    color: #FFFFFF !important;
+  }
+
+  /* Arrow icon */
+  .Select-arrow { border-top-color: #94A3B8 !important; }
+  .is-open .Select-arrow { border-bottom-color: #94A3B8 !important; }
+
+  /* Clear X button */
+  .Select-clear { color: #94A3B8 !important; }
+
+  /* Page background */
+  body { background-color: #0F172A !important; }
+
+  /* ========================= */
+  /* Slider styling */
+  /* ========================= */
+
+  /* Slider tick labels (0%,10%,20%,...) */
+  .rc-slider-mark-text,
+  .rc-slider-mark-text-active,
+  .rc-slider-mark span {
+      color: #FFFFFF !important;
+      font-size: 12px !important;
+      font-weight: 500 !important;
+  }
+
+  /* Active purple bar */
+  .rc-slider-track {
+      background-color: #A78BFA !important;
+  }
+
+  /* Background rail */
+  .rc-slider-rail {
+      background-color: #334155 !important;
+  }
+
+  /* Slider handle */
+  .rc-slider-handle {
+      border: 3px solid #A78BFA !important;
+      background-color: #FFFFFF !important;
+  }
+
+  /* Tooltip box (if shown) */
+  .rc-slider-tooltip-inner {
+      color: #000000 !important;
+      background-color: #FFFFFF !important;
+      font-weight: 700 !important;
+      font-size: 14px !important;
+  }
+
+  /* Tooltip arrow */
+  .rc-slider-tooltip-arrow {
+      border-top-color: #FFFFFF !important;
+  }
+
+</style>
+</head>
+<body>
+{%app_entry%}
+<footer>
+{%config%}
+{%scripts%}
+{%renderer%}
+</footer>
+</body>
+</html>
+"""
+
 # Shared dropdown style
-DD = {"backgroundColor": CARD, "color": TEXT, "border": f"1px solid {BORDER}"}
+DD = {"backgroundColor": "#FFFFFF", "color": "#000000", "border": "1px solid #CBD5E1"}
 DD_LABEL = {"color": MUTED, "fontSize": "11px",
             "textTransform": "uppercase", "letterSpacing": "0.05em",
             "marginBottom": "4px"}
@@ -524,6 +1250,13 @@ SECTION_BUTTONS = [
     ("F", "Choice Drivers"),
     ("G", "Barriers"),
     ("H", "Category Ecosystem"),
+    ("I", "Brand Funnel"),
+    ("J", "Market Positioning Map"),
+    ("K","Competitive Radar"),
+    ("L","Brand Power Index"),
+    ("M","Market Opportunity Heatmap"),
+    ("N","Channel Attribution"),
+    ("O","Brand Growth Simulator")
 ]
 
 app.layout = html.Div(style={"backgroundColor": BG, "minHeight": "100vh",
@@ -537,7 +1270,7 @@ app.layout = html.Div(style={"backgroundColor": BG, "minHeight": "100vh",
         html.H1("Cashify Brand Study — Decision Support System (DSS)",
                 style={"margin": 0, "fontSize": "22px", "color": "#fff",
                        "fontWeight": "800"}),
-        html.P("Refurbished (Buy) Study  |  Buyback (Sell) Study  |  All 8 Deliverables A–H",
+        html.P("Refurbished (Buy) Study  |  Buyback (Sell) Study  |  15 Brand Intelligence Modules (A–O)",
                style={"margin": "4px 0 0", "fontSize": "12px",
                       "color": "rgba(255,255,255,0.8)"}),
     ]),
@@ -588,13 +1321,46 @@ app.layout = html.Div(style={"backgroundColor": BG, "minHeight": "100vh",
                     "fontSize": "13px", "marginBottom": "12px",
                     "color": TEXT}),
 
-    # ── KPI strip ──────────────────────────────────────────────────────────
-    dbc.Row(id="kpi-strip", style={"marginBottom": "12px"}),
+# ── KPI strip ──────────────────────────────────────────────────────────
+dbc.Row(id="kpi-strip", style={"marginBottom": "12px"}),
 
-    # ── Chart ─────────────────────────────────────────────────────────────
-    dcc.Graph(id="main-chart",
-              config={"displayModeBar": True, "responsive": True},
-              style={"borderRadius": "10px", "overflow": "hidden"}),
+# ── Growth simulator control ───────────────────────────────────────────
+html.Div(
+    [
+        html.Div("Awareness Growth Simulation", style=DD_LABEL),
+
+        dcc.Slider(
+            id="awareness-slider",
+            min=0,
+            max=40,
+            step=5,
+            value=10,
+            marks={0:"0%",10:"10%",20:"20%",30:"30%",40:"40%"},
+        ),
+
+        html.Div(
+    id="slider-value",
+    style={
+        "marginTop": "6px",
+        "color": "#000000",
+        "background": "#FFFFFF",
+        "padding": "6px 10px",
+        "borderRadius": "6px",
+        "display": "inline-block",
+        "fontWeight": "600"
+    }
+)
+    ],
+    id="simulator-controls",
+    style={"marginBottom":"15px"},
+),
+
+# ── Chart ─────────────────────────────────────────────────────────────
+dcc.Graph(
+    id="main-chart",
+    config={"displayModeBar": True, "responsive": True},
+    style={"borderRadius": "10px", "overflow": "hidden"},
+),
 
     # Hidden store for active section
     dcc.Store(id="active-section", data="A"),
@@ -604,22 +1370,30 @@ app.layout = html.Div(style={"backgroundColor": BG, "minHeight": "100vh",
 
 # Update filter options when study changes
 @app.callback(
+        
     Output("dd-gender", "options"),
-    Output("dd-age",    "options"),
-    Output("dd-city",   "options"),
+    Output("dd-age", "options"),
+    Output("dd-city", "options"),
     Output("dd-gender", "value"),
-    Output("dd-age",    "value"),
-    Output("dd-city",   "value"),
+    Output("dd-age", "value"),
+    Output("dd-city", "value"),
     Input("dd-study", "value"),
+    
 )
+
 def update_filter_options(study):
     df = df_r if study == "R" else df_b
-    return (dropdown_opts("Gender", df),
-            dropdown_opts("Age",    df),
-            dropdown_opts("City",   df),
-            "All", "All", "All")
+    return (
+        dropdown_opts("Gender", df),
+        dropdown_opts("Age", df),
+        dropdown_opts("City", df),
+        "All",
+        "All",
+        "All",
+    )
 
-# Capture which section button was last clicked → store
+
+# Capture which section button was last clicked
 @app.callback(
     Output("active-section", "data"),
     [Input(f"btn-{l}", "n_clicks") for l, _ in SECTION_BUTTONS],
@@ -627,108 +1401,358 @@ def update_filter_options(study):
 )
 def set_section(*args):
     ctx = dash.callback_context
-    if not ctx.triggered: return "A"
-    btn_id = ctx.triggered[0]["prop_id"].split(".")[0]   # e.g. "btn-B"
-    return btn_id.replace("btn-", "")                    # e.g. "B"
+    if not ctx.triggered:
+        return "A"
+    btn_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    return btn_id.replace("btn-", "")
 
-# Highlight the active button
+
+# Highlight active section button
 @app.callback(
     [Output(f"btn-{l}", "style") for l, _ in SECTION_BUTTONS],
     Input("active-section", "data"),
 )
 def highlight_button(active):
+
     styles = []
+
     for letter, _ in SECTION_BUTTONS:
+
         if letter == active:
-            s = {"background": CASHIFY, "color": "#fff",
-                 "border": f"2px solid {CASHIFY}",
-                 "borderRadius": "8px", "padding": "8px 16px",
-                 "cursor": "pointer", "fontSize": "13px",
-                 "fontFamily": "inherit", "fontWeight": "700",
-                 "transition": "all 0.15s ease"}
+            style = {
+                "background": CASHIFY,
+                "color": "#fff",
+                "border": f"2px solid {CASHIFY}",
+                "borderRadius": "8px",
+                "padding": "8px 16px",
+                "cursor": "pointer",
+                "fontSize": "13px",
+                "fontWeight": "700",
+            }
         else:
-            s = {"background": CARD, "color": TEXT,
-                 "border": f"2px solid {BORDER}",
-                 "borderRadius": "8px", "padding": "8px 16px",
-                 "cursor": "pointer", "fontSize": "13px",
-                 "fontFamily": "inherit", "fontWeight": "500",
-                 "transition": "all 0.15s ease"}
-        styles.append(s)
+            style = {
+                "background": CARD,
+                "color": TEXT,
+                "border": f"2px solid {BORDER}",
+                "borderRadius": "8px",
+                "padding": "8px 16px",
+                "cursor": "pointer",
+                "fontSize": "13px",
+            }
+
+        styles.append(style)
+
     return styles
 
-# Main render callback: KPIs + chart + section label
-@app.callback(
-    Output("kpi-strip",          "children"),
-    Output("main-chart",         "figure"),
-    Output("section-indicator",  "children"),
-    Input("active-section", "data"),
-    Input("dd-study",  "value"),
-    Input("dd-gender", "value"),
-    Input("dd-age",    "value"),
-    Input("dd-city",   "value"),
-)
-def render(sec, study, gender, age, city):
-    is_r   = (study == "R")
-    df     = df_r if is_r else df_b
-    brands = BRANDS_R if is_r else BRANDS_B
-    lbl    = "Refurbished" if is_r else "Buyback"
-    g, a, c = gender or "All", age or "All", city or "All"
 
-    nps_cols  = NPS_R if is_r else NPS_B
-    fam_cols  = FAM_R if is_r else FAM_B
-    con_cols  = CON_R if is_r else CON_B
-    soa_cols  = SOA_R if is_r else SOA_B
-    cash_drv  = CASHIFY_DRV_R if is_r else CASHIFY_DRV_B
-    comp_drv  = COMP_DRV_R    if is_r else COMP_DRV_B
+@app.callback(
+    Output("slider-value","children"),
+    Input("awareness-slider","value")
+)
+def show_slider_value(v):
+    return f"Simulated awareness increase: +{v}%"
+def show_slider_value(v):
+    return f"Simulated awareness increase: +{v}%"
+def highlight_button(active):
+
+    styles = []
+
+    for letter, _ in SECTION_BUTTONS:
+
+        if letter == active:
+            style = {
+                "background": CASHIFY,
+                "color": "#fff",
+                "border": f"2px solid {CASHIFY}",
+                "borderRadius": "8px",
+                "padding": "8px 16px",
+                "cursor": "pointer",
+                "fontSize": "13px",
+                "fontWeight": "700",
+            }
+        else:
+            style = {
+                "background": CARD,
+                "color": TEXT,
+                "border": f"2px solid {BORDER}",
+                "borderRadius": "8px",
+                "padding": "8px 16px",
+                "cursor": "pointer",
+                "fontSize": "13px",
+            }
+
+        styles.append(style)
+
+    return styles
+
+@app.callback(
+    Output("simulator-controls","style"),
+    Input("active-section","data")
+)
+def toggle_simulator_controls(section):
+
+    if section == "O":
+        return {"marginBottom":"15px","display":"block"}
+
+    return {"display":"none"}
+
+
+# ── Insight generator ─────────────────────────────────────────────────────────
+
+def generate_insights(df, brands):
+
+    insights = []
+
+    awareness = {
+        b: df["Q12"]
+        .fillna("")
+        .str.lower()
+        .str.contains(b.lower(), regex=False)
+        .mean()
+        * 100
+        for b in brands
+    }
+
+    top_aw = max(awareness, key=awareness.get)
+
+    insights.append(f"Highest awareness brand: {top_aw}")
+
+    if "Cashify" in awareness:
+        if awareness["Cashify"] < max(awareness.values()):
+            insights.append(
+                "Cashify trails the category leader in awareness"
+            )
+
+    insights.append(
+        "Influencer and social media channels appear frequently in awareness drivers"
+    )
+
+    return insights
+
+def strategic_recommendations(df, brands, nps_cols):
+
+    insights = []
+
+    awareness = {
+        b: df["Q12"].fillna("").str.lower().str.contains(
+            b.lower(), regex=False
+        ).mean()*100
+        for b in brands
+    }
+
+    leader = max(awareness, key=awareness.get)
+
+    if leader != "Cashify":
+        insights.append(
+            f"{leader} leads category awareness. Cashify should increase marketing visibility."
+        )
+
+    if "Cashify" in brands:
+        cash_aw = awareness.get("Cashify",0)
+
+        if cash_aw < 40:
+            insights.append(
+                "Cashify awareness is below 40%. Stronger digital campaigns are recommended."
+            )
+
+    nps_scores = {}
+
+    for b in brands:
+        col = nps_cols.get(b,"")
+        if col in df.columns:
+            nps,_,_,_ = calc_nps(df[col])
+            nps_scores[b] = nps
+
+    if nps_scores:
+        best_nps = max(nps_scores, key=nps_scores.get)
+
+        if best_nps != "Cashify":
+            insights.append(
+                f"{best_nps} leads in customer advocacy (NPS). Cashify should improve post-purchase experience."
+            )
+
+    if len(insights) == 0:
+        insights.append("Cashify performs competitively across major brand metrics.")
+
+    return insights
+# ── Main render callback ──────────────────────────────────────────────────────
+
+@app.callback(
+    Output("kpi-strip","children"),
+    Output("main-chart","figure"),
+    Output("section-indicator","children"),
+
+    Input("active-section","data"),
+    Input("dd-study","value"),
+    Input("dd-gender","value"),
+    Input("dd-age","value"),
+    Input("dd-city","value"),
+    Input("awareness-slider","value")
+)
+def render(sec, study, gender, age, city, awareness_boost):
+
+    is_r = study == "R"
+
+    df = df_r if is_r else df_b
+    brands = BRANDS_R if is_r else BRANDS_B
+    lbl = "Refurbished" if is_r else "Buyback"
+
+    g = gender or "All"
+    a = age or "All"
+    c = city or "All"
+
+    nps_cols = NPS_R if is_r else NPS_B
+    fam_cols = FAM_R if is_r else FAM_B
+    con_cols = CON_R if is_r else CON_B
+    soa_cols = SOA_R if is_r else SOA_B
+    cash_drv = CASHIFY_DRV_R if is_r else CASHIFY_DRV_B
+    comp_drv = COMP_DRV_R if is_r else COMP_DRV_B
 
     d = flt(df, g, a, c)
     n = len(d)
 
-    # ── KPI calculations ─────────────────────────────────────────────────────
+    insights = generate_insights(d, brands)
+    recommendations = strategic_recommendations(d, brands, nps_cols)
+    opportunities = detect_market_opportunities(d, brands)
+    channel_insights = channel_strategy_insights(d)
+
+    # KPI calculations
     nps_col = nps_cols.get("Cashify", "")
-    cnps, cpro, cpas, cdet = (calc_nps(d[nps_col])
-                               if nps_col in d.columns else (0,0,0,0))
-    c_aw  = round(d["Q12"].fillna("").str.lower()
-                  .str.contains("cashify", regex=False).mean()*100)
-    c_tom = round(d["Q10"].fillna("").str.lower()
-                  .str.contains("cashify", regex=False).mean()*100)
+
+    if nps_col in d.columns:
+        cnps, cpro, cpas, cdet = calc_nps(d[nps_col])
+    else:
+        cnps, cpro, cpas, cdet = (0, 0, 0, 0)
+
+    c_aw = round(
+        d["Q12"]
+        .fillna("")
+        .str.lower()
+        .str.contains("cashify", regex=False)
+        .mean()
+        * 100
+    )
+
+    c_tom = round(
+        d["Q10"]
+        .fillna("")
+        .str.lower()
+        .str.contains("cashify", regex=False)
+        .mean()
+        * 100
+    )
 
     nps_color = "#22C55E" if cnps >= 0 else "#EF4444"
-    kpis = dbc.Row([
-        kpi_card("Sample",         n,            CASHIFY,      lbl),
-        kpi_card("Cashify NPS",    cnps,         nps_color,    "Net Promoter Score"),
-        kpi_card("Promoters",      f"{cpro}%",   "#22C55E",    "Score 9–10"),
-        kpi_card("Passives",       f"{cpas}%",   "#F59E0B",    "Score 7–8"),
-        kpi_card("Detractors",     f"{cdet}%",   "#EF4444",    "Score 0–6"),
-        kpi_card("Aided Awareness",f"{c_aw}%",   CASHIFY,      "Cashify (Q12)"),
-        kpi_card("Top of Mind",    f"{c_tom}%",  CASHIFY,      "Cashify TOM"),
-    ])
 
-    # ── Section banner ────────────────────────────────────────────────────────
+    kpis = dbc.Row(
+        [
+            kpi_card("Sample", n, CASHIFY, lbl),
+            kpi_card("Cashify NPS", cnps, nps_color, "Net Promoter Score"),
+            kpi_card("Promoters", f"{cpro}%", "#22C55E", "Score 9–10"),
+            kpi_card("Passives", f"{cpas}%", "#F59E0B", "Score 7–8"),
+            kpi_card("Detractors", f"{cdet}%", "#EF4444", "Score 0–6"),
+            kpi_card("Aided Awareness", f"{c_aw}%", CASHIFY, "Cashify"),
+            kpi_card("Top of Mind", f"{c_tom}%", CASHIFY, "Cashify TOM"),
+        ]
+    )
+
+    # Section indicator
     label_map = {l: name for l, name in SECTION_BUTTONS}
-    indicator = [
-        html.Span(f"{sec}. {label_map.get(sec,'')}",
-                  style={"color": CASHIFY, "fontWeight": "700",
-                         "marginRight": "10px"}),
-        html.Span(f"{lbl} study  |  Gender: {g}  |  Age: {a}  |  City: {c}",
-                  style={"color": MUTED}),
-    ]
 
-    # ── Chart ─────────────────────────────────────────────────────────────────
+    indicator = [
+
+html.Div([
+    html.Span(
+        f"{sec}. {label_map.get(sec,'')}",
+        style={"color": CASHIFY, "fontWeight": "700", "marginRight": "10px"},
+    ),
+
+    html.Span(
+        f"{lbl} study | Gender: {g} | Age: {a} | City: {c}",
+        style={"color": MUTED},
+    ),
+]),
+
+html.Div(
+    [
+        html.Div(
+            "Strategic Recommendations",
+            style={"fontWeight":"700","marginTop":"8px","fontSize":"13px","color":TEXT},
+        ),
+
+        html.Ul(
+            [html.Li(r) for r in recommendations],
+            style={"color":MUTED,"fontSize":"12px","marginTop":"4px"}
+        ),
+
+        html.Div(
+            "Key Insights",
+            style={"fontWeight":"700","marginTop":"8px","fontSize":"13px","color":TEXT},
+        ),
+
+        html.Ul(
+            [html.Li(i) for i in insights],
+            style={"color":MUTED,"fontSize":"12px"}
+        ),
+        html.Div(
+            "Market Opportunities",
+            style={"fontWeight":"700","marginTop":"8px","fontSize":"13px","color":TEXT}
+            ),
+            
+        html.Ul(
+            [html.Li(o) for o in opportunities],
+            style={"color":MUTED,"fontSize":"12px"}
+            ),
+        html.Div(
+            "Channel Strategy Insights",
+            style={"fontWeight":"700","marginTop":"8px","fontSize":"13px","color":TEXT}
+            ),
+        html.Ul([html.Li(i) for i in (channel_insights or ["No strong channel signals detected"])],
+            style={"color":MUTED,"fontSize":"12px"}
+        )    
+    ]
+)
+]
+
     chart_map = {
-        "A": lambda: chart_awareness(df, brands, lbl, g, a, c),
-        "B": lambda: chart_health(df, brands, fam_cols, lbl, g, a, c),
-        "C": lambda: chart_nps(df, brands, nps_cols, lbl, g, a, c),
-        "D": lambda: chart_soa(df, brands, soa_cols, lbl, g, a, c),
-        "E": lambda: chart_consideration(df, brands, con_cols, lbl, g, a, c),
-        "F": lambda: chart_drivers(df, cash_drv, comp_drv, lbl, g, a, c),
-        "G": lambda: chart_barriers(df, "Q21B", lbl, g, a, c),
-        "H": lambda: chart_category(df, is_r, lbl, g, a, c),
+        "A": lambda: chart_awareness(d, brands, lbl, g, a, c),
+        "B": lambda: chart_health(d, brands, fam_cols, lbl, g, a, c),
+        "C": lambda: chart_nps(d, brands, nps_cols, lbl, g, a, c),
+        "D": lambda: chart_soa(d, brands, soa_cols, lbl, g, a, c),
+        "E": lambda: chart_consideration(d, brands, con_cols, lbl, g, a, c),
+        "F": lambda: chart_drivers(d, cash_drv, comp_drv, lbl, g, a, c),
+        "G": lambda: chart_barriers(d, "Q21B", lbl, g, a, c),
+        "H": lambda: chart_category(d, is_r, lbl, g, a, c),
+        "I": lambda: chart_brand_funnel(d, brands, fam_cols, con_cols, lbl, g, a, c),
+        "J": lambda: chart_positioning(d, brands, nps_cols, fam_cols, con_cols, lbl, g, a, c),
+        "K": lambda: chart_radar(d, brands, fam_cols, con_cols, nps_cols, lbl, g, a, c),
+        "L": lambda: chart_brand_power(d, brands, fam_cols, con_cols, nps_cols, lbl, g, a, c),
+        "M": lambda: chart_market_opportunity(d, brands, lbl, g, a, c),
+        "N": lambda: chart_channel_attribution(d, brands, soa_cols, lbl, g, a, c),
+        "O": lambda: chart_growth_simulator(d, brands, fam_cols, con_cols, nps_cols, awareness_boost, lbl, g, a, c)
     }
-    fig = chart_map.get(sec, chart_map["A"])()
+
+    try:
+        fig = chart_map.get(sec, chart_map["A"])()
+
+    except Exception as e:
+        print("Chart error:", e)
+
+        fig = go.Figure()
+
+        fig.add_annotation(
+            text="Chart could not be generated for this filter.",
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            font=dict(size=16, color=MUTED),
+        )
+
+        fig.update_layout(**LAYOUT, height=400)
 
     return kpis, fig, indicator
-
 
 # ── 8. RUN ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
@@ -736,4 +1760,6 @@ if __name__ == "__main__":
     print("  Cashify DSS — starting server...")
     print("  Open your browser at: http://127.0.0.1:8050")
     print("="*55 + "\n")
-    app.run(debug=False, host="127.0.0.1", port=8050)
+    import os
+port = int(os.environ.get("PORT", 8050))
+app.run(debug=False, host="0.0.0.0", port=port)
